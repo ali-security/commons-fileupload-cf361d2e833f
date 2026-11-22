@@ -30,8 +30,12 @@ import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
 import java.io.OutputStream;
 
+import org.apache.commons.fileupload.disk.DiskFileItem;
 import org.apache.commons.fileupload.disk.DiskFileItemFactory;
+import org.junit.After;
+import org.junit.Before;
 import org.junit.Test;
+
 
 /**
  * Serialization Unit tests for
@@ -41,7 +45,19 @@ import org.junit.Test;
  */
 public class DiskFileItemSerializeTest {
 
-    /**
+    private static final String ERRMSG_DISKFILEITEM_DESERIALIZED = "Property org.apache.commons.fileupload.disk.DiskFileItem.serializable is not true, rejecting to deserialize a DiskFileItem.";
+
+    @Before
+    public void setUp() {
+        System.setProperty(DiskFileItem.SERIALIZABLE_PROPERTY, "true");
+    }
+
+    @After
+    public void tearDown() {
+        System.clearProperty(DiskFileItem.SERIALIZABLE_PROPERTY);
+    }
+
+	/**
      * Content type for regular form items.
      */
     private static final String textContentType = "text/plain";
@@ -63,7 +79,7 @@ public class DiskFileItemSerializeTest {
         compareBytes("Initial", item.get(), testFieldValueBytes);
 
         // Serialize & Deserialize
-        FileItem newItem = (FileItem)serializeDeserialize(item);
+        FileItem newItem =  (FileItem)serializeDeserialize(item);
 
         // Test deserialized content is as expected
         assertTrue("Check in memory", newItem.isInMemory());
@@ -154,13 +170,62 @@ public class DiskFileItemSerializeTest {
     /**
      * Test deserialization fails when repository contains a null character.
      */
-    @Test(expected=IOException.class)
+    @Test
     public void testInvalidRepositoryWithNullChar() throws Exception {
+        System.clearProperty(DiskFileItem.SERIALIZABLE_PROPERTY);
         // Create the FileItem
         byte[] testFieldValueBytes = createContentBytes(threshold);
         File repository = new File(System.getProperty("java.io.tmpdir") + "\0");
         FileItem item = createFileItem(testFieldValueBytes, repository);
-        deserialize(serialize(item));
+        try {
+        	deserialize(serialize(item));
+        	fail("Expected Exception");
+        } catch (IllegalStateException e) {
+        	assertEquals(ERRMSG_DISKFILEITEM_DESERIALIZED, e.getMessage());
+        }
+    }
+
+    /**
+     * Test that, unless explicitly enabled, deserializing a crafted
+     * DiskFileItem neither writes a new file into the repository, nor
+     * deletes the referenced backing file (CVE-2016-1000031).
+     */
+    @Test
+    public void testDeserializationRejectedByDefault() throws Exception {
+        File repository = File.createTempFile("fileupload-serialize", "");
+        assertTrue("Delete temp file", repository.delete());
+        assertTrue("Create repository", repository.mkdir());
+        try {
+            // Create a FileItem, which is backed by a file in the repository
+            byte[] testFieldValueBytes = createContentBytes(threshold + 1);
+            FileItem item = createFileItem(testFieldValueBytes, repository);
+            assertFalse("Initial: in memory", item.isInMemory());
+            File storeLocation = ((DiskFileItem) item).getStoreLocation();
+            assertNotNull("Initial: store location", storeLocation);
+            assertTrue("Initial: store location exists", storeLocation.exists());
+            ByteArrayOutputStream baos = serialize(item);
+
+            System.clearProperty(DiskFileItem.SERIALIZABLE_PROPERTY);
+            try {
+                deserialize(baos);
+                fail("Expected IllegalStateException");
+            } catch (IllegalStateException e) {
+                assertEquals(ERRMSG_DISKFILEITEM_DESERIALIZED, e.getMessage());
+            }
+
+            assertTrue("Backing file must not be deleted", storeLocation.exists());
+            assertEquals("No file must be written to the repository",
+                    1, repository.listFiles().length);
+            item.delete();
+        } finally {
+            File[] files = repository.listFiles();
+            if (files != null) {
+                for (File file : files) {
+                    file.delete();
+                }
+            }
+            repository.delete();
+        }
     }
 
     /**
